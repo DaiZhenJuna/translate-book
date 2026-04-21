@@ -9,6 +9,7 @@ translate-book is a Claude Code Skill that translates books (PDF/DOCX/EPUB) into
 - `SKILL.md` — Skill definition, the orchestration logic that Claude Code / OpenClaw follows
 - `scripts/convert.py` — PDF/DOCX/EPUB → Markdown chunks (via Calibre HTMLZ)
 - `scripts/manifest.py` — SHA-256 chunk tracking and merge validation
+- `scripts/glossary.py` — Term-consistency glossary; per-chunk term tables injected into sub-agent prompts
 - `scripts/merge_and_build.py` — Merge translated chunks → HTML/DOCX/EPUB/PDF
 - `scripts/calibre_html_publish.py` — Calibre format conversion wrapper
 - `scripts/template.html`, `scripts/template_ebook.html` — HTML templates
