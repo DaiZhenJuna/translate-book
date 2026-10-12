@@ -177,6 +177,8 @@ Bug 和功能需求请按上一节的要求提 [GitHub issue](https://github.com
 | Telegram 频道 | [@lovedesuyu](https://t.me/lovedesuyu) |
 | Email | [rainman.deus@gmail.com](mailto:rainman.deus@gmail.com) |
 
+商业赞助的说明见下方[「商业赞助」](#商业赞助)一节。
+
 频道「婴宁」记录我的见闻，以及和 AI 碰撞出的思考；交流群是它的讨论区，也欢迎来聊 translate-book。
 
 ## 流程详解
@@ -354,6 +356,14 @@ Phase 1 让术语表按批次增长,因此第一批看到的术语表最小,drif
 如果这个项目帮你节省了时间，欢迎赞助支持后续维护和改进。
 
 [![Sponsor](https://img.shields.io/github/sponsors/deusyu?label=Sponsor&logo=github)](https://github.com/sponsors/deusyu)
+
+### 商业赞助
+
+欢迎企业赞助 translate-book，合作方式可以商量，请发邮件至 [rainman.deus@gmail.com](mailto:rainman.deus@gmail.com)。
+
+不接受：
+
+- 在 README 或文档中加入第三方模型平台 / API 中转站的配置教程、Base URL 或环境变量。translate-book 本身不调用任何模型 API，翻译在用户自己的 agent 宿主（Codex、Claude Code、OpenClaw）里完成。
 
 ## License
 

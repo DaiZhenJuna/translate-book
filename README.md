@@ -177,6 +177,8 @@ For bugs and feature requests, please open a [GitHub issue](https://github.com/d
 | Telegram Channel (Chinese) | [@lovedesuyu](https://t.me/lovedesuyu) |
 | Email | [rainman.deus@gmail.com](mailto:rainman.deus@gmail.com) |
 
+For commercial sponsorship, see [Commercial sponsorship](#commercial-sponsorship) below.
+
 The channel is my running log of thinking alongside AI; the group is its discussion space, and translate-book questions are welcome there too.
 
 ## Pipeline Details
@@ -354,6 +356,14 @@ If you find this project helpful, please consider giving it a Star ⭐!
 If this project saves you time, consider sponsoring to keep it maintained and improved.
 
 [![Sponsor](https://img.shields.io/github/sponsors/deusyu?label=Sponsor&logo=github)](https://github.com/sponsors/deusyu)
+
+### Commercial sponsorship
+
+Companies are welcome to sponsor translate-book, and terms are open to discussion. Email [rainman.deus@gmail.com](mailto:rainman.deus@gmail.com).
+
+Not accepted:
+
+- Setup guides, base URLs, or environment variables for third-party model platforms or API relays in the README or docs. translate-book does not call any model API itself; translation runs inside the user's own agent host (Codex, Claude Code, OpenClaw).
 
 ## License
 
