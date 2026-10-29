@@ -269,6 +269,8 @@ python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名
 
 校验通过后：合并 → Pandoc 生成 HTML → 注入目录 → Calibre 生成 DOCX、EPUB、PDF。
 
+构建完成后中间文件会保留在 temp 目录里，因此少量译文有问题时不必整本重译：可以直接修改对应的 `output_chunkNNNN.md`，再运行 `python3 scripts/run_state.py record <temp_dir> chunkNNNN`；也可以删除该文件后重新运行 Skill 重译它。`record` 会把这个 chunk 标记为与当前术语表和源文一致，所以先运行 `python3 scripts/run_state.py plan <temp_dir>` 看一下：如果这个 chunk 因为术语表或源文有改动而被列入重译，就在修改时一并改掉，或者改为重译。如果改动的是源 chunk 本身，要先重跑 `convert.py`，让 `manifest.json` 记下新内容，否则合并会报“Source changed since splitting”。这次重跑不要带 `--strip-page-numbers` 这类页码参数：chunk 已存在时它们会直接报错，如果按报错提示删掉缓存文件，chunk 也就没了。重新运行 Skill 时，计划里还可能列出翻译之后术语有变动的其他 chunk，Skill 会先询问再重译。然后重跑 `merge_and_build.py`：只要有 chunk 比 `output.md` 新，它就会重新合并并重新生成各格式成品。不要直接改 `output.md` — 之后任何一次重新合并都会用 chunk 重建它。`--cleanup` 会永久删除 `chunk*.md`、`output_chunk*.md` 和 `input.*`，之后就无法再做这类局部修订；只在整本书定稿后使用。
+
 **注意：** `{book_name}_temp/` 是单次翻译运行的工作目录。如果修改了标题、作者、输出语言、模板或图片资源，建议使用新的 temp 目录，或先删除已有的最终产物（`output.md`、`book*.html`、`book.docx`、`book.epub`、`book.pdf`）再重跑。
 
 ## 项目结构
@@ -301,6 +303,7 @@ python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名
 | `Blank output` / `Empty output` | 某个 subagent 写出了空白或空的 chunk — 重新运行 skill 让它重译 |
 | `Missing source chunk` | 源文件被删除 — 重新运行 `convert.py` 重新生成 |
 | 翻译不完整 | 重新运行 Skill，会从中断处继续 |
+| 构建后发现少量译文需要修改 | 改对应的 `output_chunkNNNN.md` 而不是 `output.md`，再重跑 `merge_and_build.py`（见[第三步](#第三步合并与构建)） |
 | 修改标题、模板或图片后输出未更新 | 删除 temp 目录中的 `output.md`、`book*.html`、`book.docx`、`book.epub`、`book.pdf`，然后重跑 `merge_and_build.py` |
 | 想去掉 PDF 输出中的页码 | 默认会自动识别单调递增的页码序列（如 `1, 2, 3, ...`）并删除，同时保留年份（`1984`）、章节编号、引用编号等离散的独立数字行。若识别不到你的页码格式，可给 `convert.py` 加 `--strip-page-numbers`，强制删除所有独立数字行。该标志在检测到已缓存的 `input.md` 或 `chunk*.md` 时会直接报错 — 需先删除这些缓存，标志才会生效 |
 | `output.md exists but manifest invalid` | 旧输出已过时 — 脚本会自动删除并重新合并 |

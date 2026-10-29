@@ -402,13 +402,18 @@ Translate the title to the target language. For Chinese, wrap in 书名号: `《
 Run the build script with the translated title:
 
 ```bash
-python3 {baseDir}/scripts/merge_and_build.py --temp-dir "<temp_dir>" --title "<translated_title>" --cleanup
+python3 {baseDir}/scripts/merge_and_build.py --temp-dir "<temp_dir>" --title "<translated_title>"
 ```
 
 If the user provided `epub_cover`, add `--cover "<epub_cover>"`. If the user
 provided `export_name`, add `--export-name "<export_name>"`.
 
-The `--cleanup` flag removes intermediate files (chunks, input.html, etc.) after a fully successful build. If the user asked to keep intermediates, omit `--cleanup`.
+Keep the intermediate files. The chunks, `manifest.json`, and `run_state.json`
+are what make spot fixes and selective re-translation possible after the build
+(see Step 9). Add `--cleanup` only when the user explicitly asks to delete
+intermediates, and tell them first that it permanently deletes `chunk*.md`,
+`output_chunk*.md`, `input.html`, and `input.md`: after that, fixing a single
+chunk means converting and translating the whole book again.
 
 The script reads `output_lang` from `config.txt` automatically. Optional overrides: `--lang`, `--author`.
 
@@ -426,3 +431,55 @@ Tell the user:
 - The translated title
 - List generated output files with sizes
 - Any format generation failures
+
+### 9. Spot Fixes After the Build
+
+If the user finds problems in a few places after the build, fix the affected
+chunks rather than `output.md`: whenever a chunk changes, the build re-merges
+`output.md` from the chunks and discards edits made there.
+
+1. Find the chunk: search `<temp_dir>/output_chunk*.md` for the passage.
+2. Either edit `output_chunk<NNNN>.md` directly, or have it re-translated.
+
+   **Edit.** `record` stamps the chunk as matching the current source and
+   glossary, so first check what the planner still expects from it:
+
+   ```bash
+   python3 {baseDir}/scripts/run_state.py plan "<temp_dir>"
+   ```
+
+   If chunk<NNNN> appears in `chunks[]` with action `translate`, recording
+   would hide that. Handle it by reason:
+
+   - `glossary_term_hash_changed` (its `detail` lists the term ids) or
+     `glossary_term_selection_changed`: bring those terms in line with
+     `glossary.py print-terms-for-chunk "<temp_dir>" "chunk<NNNN>.md"` in the
+     same edit.
+   - `manifest_source_hash_changed`: the source chunk was edited after
+     splitting. Re-run the Step 2 `convert.py` command first, leaving out
+     page-number flags such as `--strip-page-numbers`: once chunks exist,
+     those flags abort and suggest deleting the cached files or the whole
+     temp dir, which would also delete the translations. Without them it
+     keeps the existing chunks and writes their new hashes to
+     `manifest.json`. Skip this and the merge stops with "Source changed
+     since splitting" even after re-translating. Plan again: the chunk is
+     then queued with `source_hash_changed_since_record`.
+   - `source_hash_changed_since_record` or any other reason: re-translate the
+     chunk instead of editing it.
+
+   Then record the edited output:
+
+   ```bash
+   python3 {baseDir}/scripts/run_state.py record "<temp_dir>" chunk<NNNN>
+   ```
+
+   **Re-translate.** Delete `output_chunk<NNNN>.md` and run Steps 3.7–4.5 again. The planner
+   re-checks the whole book, so `translation_chunk_ids` can also list chunks
+   the user did not mention, typically ones whose glossary terms changed after
+   they were translated (`glossary_term_selection_changed` or
+   `glossary_term_hash_changed` in the plan's `chunks[].reasons`). Translate
+   only the chunks the user asked for; if the plan lists others, show the user
+   those chunk ids with their reasons and ask before re-translating them.
+3. Re-run the Step 7 build command with the same flags. It re-merges because
+   the chunk is newer than `output.md`, then regenerates the HTML and the other
+   formats.

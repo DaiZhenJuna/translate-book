@@ -269,6 +269,8 @@ Before merging, the script validates:
 
 Then: merge → Pandoc HTML → inject TOC → Calibre generates DOCX, EPUB, PDF.
 
+Intermediate files stay in the temp dir after the build, so a few bad passages can be fixed without re-translating the book. Either edit the affected `output_chunkNNNN.md` and run `python3 scripts/run_state.py record <temp_dir> chunkNNNN`, or delete the file and re-run the skill to re-translate it. `record` marks the chunk as matching the current glossary and source, so run `python3 scripts/run_state.py plan <temp_dir>` first: if that chunk is queued for re-translation because the glossary or its source changed, apply those changes in your edit or re-translate it instead. If the source chunk itself was edited, re-run `convert.py` first so `manifest.json` records the change; otherwise the merge stops with "Source changed since splitting". Leave out page-number flags such as `--strip-page-numbers` on that re-run: once chunks exist they abort, and deleting the cached files as the error suggests would discard the chunks. A re-run may also queue other chunks whose glossary terms changed after they were translated; the skill asks before re-translating those. Then re-run `merge_and_build.py`: it re-merges when a chunk is newer than `output.md` and regenerates the outputs. Do not edit `output.md` itself — any later re-merge rebuilds it from the chunks. `--cleanup` permanently deletes `chunk*.md`, `output_chunk*.md`, and `input.*`, which rules such fixes out; use it only when you are done with the book.
+
 **Note:** `{book_name}_temp/` is a working directory for a single translation run. If you change the title, author, output language, template, or image assets, either use a fresh temp directory or delete the existing final artifacts (`output.md`, `book*.html`, `book.docx`, `book.epub`, `book.pdf`) before re-running.
 
 ## Project Structure
@@ -301,6 +303,7 @@ Then: merge → Pandoc HTML → inject TOC → Calibre generates DOCX, EPUB, PDF
 | `Blank output` / `Empty output` | A subagent wrote a whitespace-only or empty chunk — re-run the skill to re-translate it |
 | `Missing source chunk` | Source file deleted — re-run `convert.py` to regenerate |
 | Incomplete translation | Re-run the skill — it resumes from where it stopped |
+| A few passages need fixing after the build | Fix the affected `output_chunkNNNN.md` instead of `output.md`, then re-run `merge_and_build.py` (see [Step 3](#step-3-merge--build)) |
 | Changed title/template/assets but output didn't update | Delete existing `output.md`, `book*.html`, `book.docx`, `book.epub`, `book.pdf` from the temp dir, then re-run `merge_and_build.py` |
 | Want page-number footers stripped from PDF output | By default, monotonic page-number sequences (e.g. `1, 2, 3, ...`) are auto-detected and dropped while outliers like years (`1984`), chapter numbers, and citation indices stay preserved. If detection misses your case, pass `--strip-page-numbers` to `convert.py` to aggressively delete every standalone-digit line. The flag aborts if a cached `input.md` or `chunk*.md` already exists — delete them first so the flag actually takes effect. |
 | `output.md exists but manifest invalid` | Stale output — the script auto-deletes and re-merges |
