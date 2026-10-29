@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -262,6 +264,436 @@ class CleanCalibreMarkersTests(unittest.TestCase):
         self.assertIn("Introduction text follows.", cleaned)
 
 
+class EmptyAnchorLineTests(unittest.TestCase):
+    def test_drops_lines_holding_only_empty_anchors(self):
+        content = "\n".join(
+            [
+                "[]",
+                "",
+                "## Chapter",
+                "",
+                "Text.",
+                "",
+                "[]{#page_3 .calibre1}",
+                "",
+                "[[]{#a}](#b)",
+            ]
+        )
+
+        cleaned = convert.clean_calibre_markers(content)
+
+        self.assertNotIn("[", cleaned)
+        self.assertIn("## Chapter", cleaned)
+        self.assertIn("Text.", cleaned)
+
+    def test_anchor_line_still_shields_digit_from_calibre_fence(self):
+        # The digit's nearest neighbour is the anchor line, not the ::: fence,
+        # exactly as before anchor lines were dropped.
+        content = "\n".join(["::: {.calibre}", "[]", "", "1", "", "## Chapter One"])
+
+        cleaned = convert.clean_calibre_markers(content)
+
+        self.assertIn("\n1\n", f"\n{cleaned}\n")
+        self.assertNotIn("[]", cleaned)
+
+    def test_keeps_bracketed_text_lines(self):
+        cleaned = convert.clean_calibre_markers("[1]\n\n[Note]\n")
+
+        self.assertIn("[1]", cleaned)
+        self.assertIn("[Note]", cleaned)
+
+    def test_keeps_empty_list_literals_in_code_blocks(self):
+        # Pandoc writes attributed code fenced at column 0 and plain code indented.
+        content = "\n".join(
+            ["``` python", "y = [", "[]", "]", "```", "", "    x = (", "    []", "    )"]
+        )
+
+        cleaned = convert.clean_calibre_markers(content)
+
+        self.assertIn("y = [\n[]\n]", cleaned)
+        self.assertIn("    x = (\n    []\n    )", cleaned)
+
+
+SPACE = {"t": "Space"}
+
+
+def _str(text):
+    return {"t": "Str", "c": text}
+
+
+def _words(text):
+    inlines = []
+    for word in text.split(" "):
+        if inlines:
+            inlines.append(SPACE)
+        inlines.append(_str(word))
+    return inlines
+
+
+def _sup(*inlines):
+    return {"t": "Superscript", "c": list(inlines)}
+
+
+def _link(target, *inlines, ident=""):
+    return {"t": "Link", "c": [[ident, [], []], list(inlines), [target, ""]]}
+
+
+def _span(*inlines, ident="", attrs=()):
+    return {"t": "Span", "c": [[ident, [], [list(a) for a in attrs]], list(inlines)]}
+
+
+def _para(*inlines):
+    return {"t": "Para", "c": list(inlines)}
+
+
+def _div(ident, *blocks):
+    return {"t": "Div", "c": [[ident, ["calibre"], []], list(blocks)]}
+
+
+def _doc(*blocks):
+    return {"pandoc-api-version": [1, 23, 1], "meta": {}, "blocks": list(blocks)}
+
+
+def _notes(node):
+    if isinstance(node, dict) and "blocks" in node:
+        node = node["blocks"]
+    found = []
+    if isinstance(node, dict):
+        if node.get("t") == "Note":
+            found.append(node)
+        node = node.get("c")
+    if isinstance(node, list):
+        for item in node:
+            found.extend(_notes(item))
+    return found
+
+
+class CleanCalibreAstFootnoteTests(unittest.TestCase):
+    def test_converts_sup_footnote_pair_into_note(self):
+        # Calibre output for <a id="fr1" href="#fn1"><sup>1</sup></a> and
+        # <p id="fn1"><a href="#fr1"><sup>1</sup></a> Note.</p>
+        doc = _doc(
+            _para(*_words("A footnote ref."),
+                  _link("#calibre_link-2", _sup(_str("1")), ident="calibre_link-3")),
+            _para(_link("#calibre_link-3", _sup(_str("1"))), SPACE, *_words("First chapter note.")),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 1)
+
+        self.assertEqual(len(doc["blocks"]), 1)
+        self.assertEqual(
+            doc["blocks"][0]["c"][-1],
+            {"t": "Note", "c": [_para(*_words("First chapter note."))]},
+        )
+
+    def test_restarted_numbering_gives_each_reference_its_own_note(self):
+        doc = _doc(
+            _div("calibre_link-0",
+                 _para(_str("One."), _link("#c1-fn1", _sup(_str("1")), ident="c1-fr1")),
+                 _para(_link("#c1-fr1", _sup(_str("1"))), SPACE, *_words("First note."))),
+            _div("calibre_link-4",
+                 _para(_str("Two."), _link("#c2-fn1", _sup(_str("1")), ident="c2-fr1")),
+                 _para(_link("#c2-fr1", _sup(_str("1"))), SPACE, *_words("Second note."))),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 2)
+
+        notes = _notes(doc)
+        self.assertEqual(
+            [note["c"] for note in notes],
+            [[_para(*_words("First note."))], [_para(*_words("Second note."))]],
+        )
+        for div in doc["blocks"]:
+            self.assertEqual(len(div["c"][1]), 1)
+
+    def test_sup_outside_link_and_span_wrapped_and_bracketed_markers(self):
+        doc = _doc(
+            _para(_str("Sup."), _sup(_link("#n2", _str("2"), ident="r2")),
+                  SPACE, _str("Span."), _span(_link("#n3", _sup(_str("3"))), ident="r3"),
+                  SPACE, _str("Gutenberg."), _link("#Footnote_5", _str("[5]"), ident="FNanchor_5")),
+            _para(_sup(_link("#r2", _str("2"))), SPACE, *_words("Note two.")),
+            _para(_span(ident="n3"), _link("#r3", _sup(_str("3"))), SPACE, *_words("Note three.")),
+            _para(_link("#FNanchor_5", _str("[5]"), ident="Footnote_5"), SPACE, *_words("Note five.")),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 3)
+
+        self.assertEqual(len(doc["blocks"]), 1)
+        inlines = doc["blocks"][0]["c"]
+        self.assertNotIn("Superscript", [x["t"] for x in inlines])
+        self.assertEqual(
+            [note["c"] for note in _notes(doc)],
+            [[_para(*_words("Note two."))], [_para(*_words("Note three."))],
+             [_para(*_words("Note five."))]],
+        )
+
+    def test_div_note_keeps_every_paragraph_when_reference_targets_the_div(self):
+        doc = _doc(
+            _para(_str("Text."), _link("#n4", _sup(_str("4")), ident="r4")),
+            _div("n4",
+                 _para(_link("#r4", _str("4")), _str("."), SPACE, *_words("First paragraph.")),
+                 _para(*_words("Second paragraph."))),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 1)
+
+        self.assertEqual(len(doc["blocks"]), 1)
+        self.assertEqual(
+            _notes(doc)[0]["c"],
+            [_para(*_words("First paragraph.")), _para(*_words("Second paragraph."))],
+        )
+
+    def test_marker_mismatch_is_not_converted(self):
+        doc = _doc(
+            _para(_str("Text."), _link("#n9", _sup(_str("9")), ident="r9")),
+            _para(_link("#r9", _sup(_str("10"))), SPACE, *_words("Wrong note.")),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 0)
+
+        self.assertEqual(len(doc["blocks"]), 2)
+        self.assertEqual(doc["blocks"][0]["c"], [_str("Text."), _sup(_str("9"))])
+
+    def test_link_opening_its_line_is_not_a_reference(self):
+        # A contents entry and the chapter it points at link to each other with
+        # the same number, but neither is a footnote.
+        doc = _doc(
+            _para(_link("#ch1", _str("1"), ident="toc1"), SPACE, *_words("Down the Rabbit-Hole")),
+            _para(_link("#toc1", _str("1"), ident="ch1"), SPACE, *_words("Down the Rabbit-Hole")),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 0)
+
+        self.assertEqual(len(doc["blocks"]), 2)
+        for block in doc["blocks"]:
+            self.assertEqual(block["c"], [_str("1"), SPACE, *_words("Down the Rabbit-Hole")])
+
+    def test_reference_inside_a_note_stays_inline(self):
+        # Pandoc cannot nest notes: note 8 must stay a paragraph rather than vanish.
+        doc = _doc(
+            _para(_str("Text."), _link("#n7", _sup(_str("7")), ident="r7")),
+            _para(_link("#r7", _sup(_str("7"))), SPACE, *_words("Note seven cites"),
+                  _link("#n8", _sup(_str("8")), ident="r8"), _str(".")),
+            _para(_link("#r8", _sup(_str("8"))), SPACE, *_words("Note eight.")),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 1)
+
+        self.assertEqual(len(doc["blocks"]), 2)
+        self.assertEqual(
+            _notes(doc)[0]["c"],
+            [_para(*_words("Note seven cites"), _sup(_str("8")), _str("."))],
+        )
+        self.assertEqual(doc["blocks"][1]["c"], [_sup(_str("8")), SPACE, *_words("Note eight.")])
+
+
+class CleanCalibreAstPandocNoteTests(unittest.TestCase):
+    # pandoc 3.6+ reads DPUB-ARIA notes (role="doc-noteref") as Note elements
+    # of its own, and before 3.13 it drops a note nested in another note.
+
+    def test_reference_inside_a_pandoc_note_stays_inline(self):
+        native = {"t": "Note", "c": [_para(*_words("Native note citing another."),
+                                            _link("#n2", _sup(_str("2")), ident="r2"))]}
+        doc = _doc(
+            _para(*_words("Main text."), native),
+            _para(_link("#r2", _sup(_str("2"))), SPACE, *_words("Backlinked note.")),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 0)
+
+        self.assertEqual(len(_notes(doc)), 1)
+        self.assertEqual(doc["blocks"][1], _para(_sup(_str("2")), SPACE, *_words("Backlinked note.")))
+
+    def test_note_whose_text_holds_a_pandoc_note_stays_a_paragraph(self):
+        native = {"t": "Note", "c": [_para(*_words("Native note."))]}
+        doc = _doc(
+            _para(*_words("Main text."), _link("#n1", _sup(_str("1")), ident="r1")),
+            _para(_link("#r1", _sup(_str("1"))), SPACE, *_words("Backlinked note citing"), native),
+        )
+
+        self.assertEqual(convert.clean_calibre_ast(doc), 0)
+
+        self.assertEqual(len(doc["blocks"]), 2)
+        self.assertEqual(len(_notes(doc)), 1)
+
+
+class CleanCalibreAstMarkupTests(unittest.TestCase):
+    def test_unwraps_in_book_links_and_spans_and_drops_inline_anchors(self):
+        doc = _doc(
+            _para(*_words("A page anchor"), _span(ident="calibre_link-11"), SPACE,
+                  _link("#calibre_link-1", _str("cross-reference")), _str(","), SPACE,
+                  _span(*_words("sic erat"), attrs=[("lang", "lat")]), SPACE,
+                  _link("https://example.com", _str("site"))),
+        )
+
+        convert.clean_calibre_ast(doc)
+
+        self.assertEqual(
+            doc["blocks"][0]["c"],
+            [*_words("A page anchor"), SPACE, _str("cross-reference,"), SPACE,
+             *_words("sic erat"), SPACE, _link("https://example.com", _str("site"))],
+        )
+
+    def test_unwrapped_number_and_period_stay_one_token(self):
+        # Split as Str "4", Str ".", pandoc's writer would not escape the
+        # paragraph start and it would read back as an ordered list.
+        doc = _doc(_para(_span(ident="x1"), _link("#x9", _str("4")), _str("."), SPACE, *_words("Text.")))
+
+        convert.clean_calibre_ast(doc)
+
+        self.assertEqual(doc["blocks"][0]["c"], [_str("4."), SPACE, *_words("Text.")])
+
+    def test_keeps_anchor_only_lines_for_the_page_number_pass(self):
+        anchor_line = {"t": "Plain", "c": [_span(ident="calibre_link-8")]}
+        doc = _doc(anchor_line)
+
+        convert.clean_calibre_ast(doc)
+
+        self.assertEqual(doc["blocks"], [{"t": "Plain", "c": [_span(ident="calibre_link-8")]}])
+
+    def test_clears_heading_attributes(self):
+        doc = _doc(
+            {"t": "Header", "c": [2, ["ch1-title", ["ch_title"], []],
+                                  [_span(ident="calibre_link-10"), *_words("Chapter One")]]},
+        )
+
+        convert.clean_calibre_ast(doc)
+
+        self.assertEqual(doc["blocks"][0]["c"], [2, ["", [], []], _words("Chapter One")])
+
+    def test_whitespace_only_spans_keep_their_whitespace(self):
+        # `Hello<span> </span>World` and a `<span><br/></span>` line break.
+        doc = _doc(
+            _para(_str("Hello"), _span(SPACE), _str("World")),
+            _para(*_words("line one"), _span({"t": "LineBreak"}), *_words("line two")),
+        )
+
+        convert.clean_calibre_ast(doc)
+
+        self.assertEqual(doc["blocks"][0]["c"], _words("Hello World"))
+        self.assertEqual(
+            doc["blocks"][1]["c"],
+            [*_words("line one"), {"t": "LineBreak"}, *_words("line two")],
+        )
+
+    def test_anchor_nested_in_a_whitespace_span_is_still_dropped(self):
+        doc = _doc(_para(
+            _str("A"), _span(SPACE, _span(ident="page_3")), _str("B"),
+            _link("https://example.com", SPACE), _str("C"),
+        ))
+
+        convert.clean_calibre_ast(doc)
+
+        self.assertEqual(doc["blocks"][0]["c"], [_str("A"), SPACE, _str("B"), SPACE, _str("C")])
+
+    def test_clears_external_link_attributes(self):
+        # Calibre classes such as `pcalibre1` survive on external links and
+        # would be written out as `[site](https://example.com){.pcalibre1}`.
+        link = {"t": "Link", "c": [["calibre_link-5", ["pcalibre1", "pcalibre"], [["type", "x"]]],
+                                   [_str("site")], ["https://example.com", "Example"]]}
+        doc = _doc(_para(*_words("Visit"), SPACE, link))
+
+        convert.clean_calibre_ast(doc)
+
+        self.assertEqual(
+            doc["blocks"][0]["c"][-1],
+            {"t": "Link", "c": [["", [], []], [_str("site")], ["https://example.com", "Example"]]},
+        )
+
+
+def _pandoc_available():
+    try:
+        import pypandoc
+
+        pypandoc.get_pandoc_version()
+        return True
+    except Exception:
+        return False
+
+
+# Body of the input.html Calibre 7.6 writes for the reproduction EPUB attached
+# to issues #49 and #50.
+ISSUE_49_50_CALIBRE_HTML = """<html><head><meta http-equiv="Content-Type" content="text/html;charset=utf-8" /><title>Repro</title></head><body><div class="calibre" id="calibre_link-0">
+<a id="calibre_link-8"></a>
+<h2 class="ch_title" id="calibre_link-9"><a id="calibre_link-10" class="calibre1"></a>Chapter One</h2>
+<p class="calibre2">A paragraph with a page anchor<a id="calibre_link-11"></a> in the middle, an
+internal <a href="#calibre_link-1">cross-reference</a>, a
+<span lang="lat">sic erat scriptum</span> span, an em dash&mdash;like this,
+an en dash (pp. 12&ndash;34), and a footnote ref.<a href="#calibre_link-2" id="calibre_link-3"><sup class="calibre3">1</sup></a></p>
+<p class="calibre2" id="calibre_link-2"><a href="#calibre_link-3"><sup class="calibre3">1</sup></a> First chapter note.</p>
+</div>
+<div class="calibre" id="calibre_link-4">
+<a id="calibre_link-12"></a>
+<h2 class="ch_title" id="calibre_link-13">Chapter Two</h2>
+<p class="calibre2">Another chapter, whose footnote numbering restarts at one.<a href="#calibre_link-5" id="calibre_link-6"><sup class="calibre3">1</sup></a></p>
+<p class="calibre2" id="calibre_link-5"><a href="#calibre_link-6"><sup class="calibre3">1</sup></a> Second chapter note.</p>
+</div>
+<div class="calibre" id="calibre_link-7">
+<p class="calibre2" id="calibre_link-1">Doe, J. <em class="calibre4">Some Book</em>. Press, 2001.</p>
+<p class="calibre2">&mdash;&mdash;&mdash; <em class="calibre4">Another Book</em>. Press, 2005.</p>
+</div>
+</body></html>
+"""
+
+
+@unittest.skipUnless(_pandoc_available(), "pypandoc and pandoc are required")
+class ConvertHtmlToMarkdownPandocTests(unittest.TestCase):
+    def test_issue_49_50_reproduction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html = Path(tmp) / "input.html"
+            md = Path(tmp) / "input.md"
+            html.write_text(ISSUE_49_50_CALIBRE_HTML, encoding="utf-8")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(convert.convert_html_to_markdown(str(html), str(md)))
+
+            self.assertEqual(
+                md.read_text(encoding="utf-8").strip(),
+                "\n".join(
+                    [
+                        "## Chapter One",
+                        "",
+                        "A paragraph with a page anchor in the middle, an internal cross-reference, "
+                        "a sic erat scriptum span, an em dash—like this, an en dash (pp. 12–34), "
+                        "and a footnote ref.[^1]",
+                        "",
+                        "[^1]: First chapter note.",
+                        "",
+                        "## Chapter Two",
+                        "",
+                        "Another chapter, whose footnote numbering restarts at one.[^2]",
+                        "",
+                        "[^2]: Second chapter note.",
+                        "",
+                        "Doe, J. *Some Book*. Press, 2001.",
+                        "",
+                        "——— *Another Book*. Press, 2005.",
+                    ]
+                ),
+            )
+
+    def test_chapter_number_after_page_anchor_survives_and_unwrapped_number_is_escaped(self):
+        # Dropping the anchor line too early would put the "1" next to the
+        # ::: fence of the chapter div, where the Calibre-noise rule deletes it.
+        with tempfile.TemporaryDirectory() as tmp:
+            html = Path(tmp) / "input.html"
+            md = Path(tmp) / "input.md"
+            html.write_text(
+                '<html><body><div class="calibre" id="calibre_link-0">'
+                '<a id="calibre_link-5"></a><p>1</p><h2>Chapter One</h2><p>Opening text.</p></div>'
+                '<p><a href="#calibre_link-9">4</a>. Not a list.</p></body></html>',
+                encoding="utf-8",
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(convert.convert_html_to_markdown(str(html), str(md)))
+
+            self.assertEqual(
+                md.read_text(encoding="utf-8").strip(),
+                "1\n\n## Chapter One\n\nOpening text.\n\n4\\. Not a list.",
+            )
+
+
 class TempRootTests(unittest.TestCase):
     def test_build_temp_dir_preserves_cwd_local_default(self):
         self.assertEqual(convert.build_temp_dir("/books/Alice.epub"), "Alice_temp")
@@ -509,6 +941,44 @@ class DisplayMathBlockTests(unittest.TestCase):
         blocks = convert.parse_structural_blocks(content)
         chunks = convert.merge_blocks_to_chunks(blocks, target_size=200)
         self.assertEqual(sum(formula in chunk for chunk in chunks), 1)
+
+
+class FootnoteBlockTests(unittest.TestCase):
+    NOTE = "[^1]: First paragraph of the note.\n\n    Second paragraph of the note."
+
+    def test_definition_and_indented_continuation_form_one_block(self):
+        content = f"Text.[^1]\n\n{self.NOTE}\n\nNext paragraph."
+
+        blocks = convert.parse_structural_blocks(content)
+
+        self.assertIn((self.NOTE, "footnote"), blocks)
+        self.assertIn(("Next paragraph.", "paragraph"), blocks)
+
+    def test_note_continuation_is_never_split_from_its_definition(self):
+        content = "A" * 150 + "[^1]\n\n" + self.NOTE + "\n\n" + "B" * 150
+        blocks = convert.parse_structural_blocks(content)
+        chunks = convert.merge_blocks_to_chunks(blocks, target_size=60)
+        self.assertEqual(sum(self.NOTE in chunk for chunk in chunks), 1)
+
+    def test_oversized_note_stays_in_one_chunk(self):
+        # Force-splitting it would open the next chunk with the indented
+        # continuation, which loses its indent when chunks are merged.
+        note = "[^1]: " + "First paragraph. " * 10 + "\n\n    " + "Second paragraph. " * 10
+        blocks = convert.parse_structural_blocks(f"Text.[^1]\n\n{note}\n\nNext paragraph.")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            chunks = convert.merge_blocks_to_chunks(blocks, target_size=60)
+
+        self.assertIn(note, chunks)
+
+    def test_long_final_note_leaves_no_blank_chunk(self):
+        note = "[^1]: " + "First paragraph. " * 10 + "\n\n    " + "Second paragraph. " * 10
+        blocks = convert.parse_structural_blocks(f"Text.[^1]\n\n{note}\n")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            chunks = convert.merge_blocks_to_chunks(blocks, target_size=60)
+
+        self.assertEqual([chunk for chunk in chunks if not chunk.strip()], [])
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png"

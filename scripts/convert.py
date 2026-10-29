@@ -297,16 +297,332 @@ def setup_temp_directory(input_file, html_file, images_dir, temp_root=None):
         return None
 
 
+# =============================================================================
+# Structural cleanup on pandoc's JSON AST (Calibre HTML -> Markdown)
+# =============================================================================
+
+_INLINE_TYPES = frozenset({
+    "Str", "Emph", "Underline", "Strong", "Strikeout", "Superscript", "Subscript",
+    "SmallCaps", "Quoted", "Cite", "Code", "Space", "SoftBreak", "LineBreak",
+    "Math", "RawInline", "Link", "Image", "Note", "Span",
+})
+_SPACE_TYPES = frozenset({"Space", "SoftBreak", "LineBreak"})
+_FORMATTING_TYPES = frozenset({
+    "Emph", "Underline", "Strong", "Strikeout", "Superscript", "Subscript", "SmallCaps",
+})
+# Digits or note symbols, optionally bracketed and/or followed by a period:
+# "1", "[12]", "(3)", "4.", "*", "†".
+_FOOTNOTE_MARKER_RE = re.compile(r'^[\[(]?(\d{1,4}|[*†‡§¶‖]{1,3})[\])]?\.?$')
+_NOTE_MARKER_TRAILERS = frozenset({".", ")", "]", ":"})
+
+
+def _map_inline_lists(node, fn, top_down=False):
+    """Rewrite every inline list of a pandoc JSON AST in place via fn(list) -> list."""
+    if isinstance(node, dict):
+        if isinstance(node.get("c"), list):
+            _map_inline_lists(node["c"], fn, top_down)
+        return
+    if not isinstance(node, list):
+        return
+    is_inline_list = bool(node) and all(
+        isinstance(x, dict) and x.get("t") in _INLINE_TYPES for x in node
+    )
+    if is_inline_list and top_down:
+        node[:] = fn(node)
+    for item in node:
+        _map_inline_lists(item, fn, top_down)
+    if is_inline_list and not top_down:
+        node[:] = fn(node)
+
+
+def _inline_text(inlines):
+    parts = []
+    for x in inlines:
+        t = x.get("t")
+        if t == "Str":
+            parts.append(x["c"])
+        elif t in _SPACE_TYPES:
+            parts.append(" ")
+        elif t in _FORMATTING_TYPES:
+            parts.append(_inline_text(x["c"]))
+        elif t in ("Span", "Link", "Quoted"):
+            parts.append(_inline_text(x["c"][1]))
+        elif t == "Code":
+            parts.append(x["c"][1])
+    return "".join(parts)
+
+
+def _is_anchor(inline):
+    """An element that renders nothing, e.g. an id-only <a id="page_12"/>."""
+    if inline.get("t") not in ("Span", "Link"):
+        return False
+    return all(_is_anchor(x) for x in inline["c"][1])
+
+
+def _is_filler(inline):
+    """Whitespace, or a span/link holding nothing but whitespace and anchors."""
+    if inline.get("t") in _SPACE_TYPES:
+        return True
+    if inline.get("t") not in ("Span", "Link"):
+        return False
+    return all(_is_filler(x) for x in inline["c"][1])
+
+
+def _footnote_marker(inlines):
+    match = _FOOTNOTE_MARKER_RE.match(_inline_text(inlines).strip())
+    return match.group(1) if match else None
+
+
+def _footnote_link(inline):
+    """Return (link, anchor ids) when inline is a footnote-marker link to an in-book target.
+
+    The link may sit alone or inside <sup>/<span> wrappers; the ids are every
+    anchor a note's back-link may point at (the link's own id and its wrapping
+    spans' ids).
+    """
+    t = inline.get("t")
+    if t == "Link":
+        attr, content, (url, _title) = inline["c"]
+        if url.startswith("#") and len(url) > 1 and _footnote_marker(content):
+            return inline, [attr[0]] if attr[0] else []
+        return None
+    if t in ("Superscript", "Span"):
+        content = inline["c"] if t == "Superscript" else inline["c"][1]
+        solid = [x for x in content if not _is_filler(x)]
+        if len(solid) == 1:
+            found = _footnote_link(solid[0])
+            if found and t == "Span" and inline["c"][0][0]:
+                found[1].append(inline["c"][0][0])
+            return found
+    return None
+
+
+def _index_footnote_refs(blocks):
+    """Map anchor id -> footnote reference link, for marker links inside running text.
+
+    A marker link that opens its line is a note's back-link or a contents
+    entry, never a reference, so it is not indexed.
+    """
+    refs = {}
+
+    def visit(inlines):
+        after_text = False
+        for x in inlines:
+            if after_text:
+                found = _footnote_link(x)
+                if found:
+                    link, anchor_ids = found
+                    for anchor_id in anchor_ids:
+                        refs.setdefault(anchor_id, link)
+            if not _is_filler(x):
+                after_text = True
+        return inlines
+
+    _map_inline_lists(blocks, visit)
+    return refs
+
+
+def _note_body(block, refs):
+    """Return (reference link, note inlines) when block opens with a back-link to a known reference."""
+    if block.get("t") not in ("Para", "Plain"):
+        return None
+    inlines = block["c"]
+    i = 0
+    while i < len(inlines) and _is_filler(inlines[i]):
+        i += 1
+    found = _footnote_link(inlines[i]) if i < len(inlines) else None
+    if not found:
+        return None
+    backlink = found[0]
+    ref = refs.get(backlink["c"][2][0][1:])
+    if ref is None or _footnote_marker(ref["c"][1]) != _footnote_marker(backlink["c"][1]):
+        return None
+    body = inlines[i + 1:]
+    while body and (
+        _is_filler(body[0])
+        or (body[0].get("t") == "Str" and body[0]["c"] in _NOTE_MARKER_TRAILERS)
+    ):
+        body = body[1:]
+    return (ref, body) if body else None
+
+
+def _collect_notes(blocks, refs, found):
+    """Append (ref, container, block, note blocks) for note paragraphs in body/div block lists."""
+    for block in blocks:
+        if block.get("t") == "Div":
+            attr, inner = block["c"]
+            solid = [b for b in inner if not (
+                b.get("t") in ("Para", "Plain") and all(_is_filler(x) for x in b["c"])
+            )]
+            hit = _note_body(solid[0], refs) if solid else None
+            # A div is the whole note only when the reference points at the div itself.
+            if hit and attr[0] and hit[0]["c"][2][0] == "#" + attr[0]:
+                found.append((hit[0], blocks, block, [{"t": "Para", "c": hit[1]}] + solid[1:]))
+                continue
+            _collect_notes(inner, refs, found)
+            continue
+        hit = _note_body(block, refs)
+        if hit:
+            found.append((hit[0], blocks, block, [{"t": "Para", "c": hit[1]}]))
+
+
+def _pandoc_notes(node):
+    """Return the block lists of the Note elements found anywhere in node."""
+    found = []
+    if isinstance(node, dict):
+        if node.get("t") == "Note":
+            found.append(node["c"])
+        if isinstance(node.get("c"), list):
+            found.extend(_pandoc_notes(node["c"]))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_pandoc_notes(item))
+    return found
+
+
+def convert_footnotes(blocks):
+    """Turn EPUB-style footnotes into pandoc notes. Returns the number converted.
+
+    A reference is a short marker link in running text (`<a href="#n1"><sup>1</sup></a>`,
+    `<sup><a>1</a></sup>`, `[1]`); its note is the paragraph (or the div the
+    reference points at) that opens with a back-link to that reference with the
+    same marker. Calibre renames ids and classes, so pairing relies only on this
+    two-way link structure. Pandoc's Markdown writer then numbers the notes
+    across the whole book, so labels stay unique when per-chapter numbering
+    restarts.
+    """
+    refs = _index_footnote_refs(blocks)
+    if not refs:
+        return 0
+    candidates = []
+    _collect_notes(blocks, refs, candidates)
+
+    notes = {}
+    for ref, container, block, content in candidates:
+        notes.setdefault(id(ref), (container, block, content))
+    # Pandoc before 3.13 drops a note written inside another note, so nothing
+    # that would end up nested is converted: a reference inside a note (one
+    # pandoc already read, e.g. a DPUB-ARIA note, or one converted here) stays
+    # inline, and a note whose text holds a pandoc note stays a paragraph.
+    nested = set()
+    for note in _pandoc_notes(blocks) + [[block] for _container, block, _content in notes.values()]:
+        nested.update(id(link) for link in _index_footnote_refs(note).values())
+    for key, (_container, _block, content) in notes.items():
+        if _pandoc_notes(content):
+            nested.add(key)
+    for key in nested:
+        notes.pop(key, None)
+
+    used = set()
+
+    def replace(inlines):
+        out = []
+        for x in inlines:
+            found = _footnote_link(x)
+            key = id(found[0]) if found else None
+            if key in notes and key not in used:
+                used.add(key)
+                out.append({"t": "Note", "c": notes[key][2]})
+            else:
+                out.append(x)
+        return out
+
+    _map_inline_lists(blocks, replace, top_down=True)
+
+    for key in used:
+        container, block, _content = notes[key]
+        for i, candidate in enumerate(container):
+            if candidate is block:
+                del container[i]
+                break
+    return len(used)
+
+
+def _unwrap_inline_markup(inlines):
+    """Unwrap spans and in-book links, clear the attributes of other links, and
+    drop empty anchors inside text.
+
+    Lists made only of anchors are left alone: they become `[]` lines that
+    clean_calibre_markers() drops after its page-number pass, which keeps that
+    pass seeing the same neighbouring lines as before.
+    """
+    if all(_is_filler(x) for x in inlines):
+        return inlines
+    out = []
+    # Unwrapped children are processed in turn, so an anchor nested in a span
+    # is still dropped while the span's spaces and line breaks are kept.
+    pending = list(reversed(inlines))
+    while pending:
+        x = pending.pop()
+        t = x.get("t")
+        if _is_anchor(x):
+            continue
+        if t == "Span" or (t == "Link" and (x["c"][2][0].startswith("#") or _is_filler(x))):
+            pending.extend(reversed(x["c"][1]))
+        else:
+            if t == "Link":
+                x["c"][0] = ["", [], []]
+            out.append(x)
+    # Re-join text split by an unwrapped element, as pandoc's readers would:
+    # the Markdown writer only escapes a leading "4." or "#" it sees in one Str.
+    merged = []
+    for x in out:
+        if merged and x.get("t") == "Str" and merged[-1].get("t") == "Str":
+            merged[-1] = {"t": "Str", "c": merged[-1]["c"] + x["c"]}
+        else:
+            merged.append(x)
+    return merged
+
+
+def _clear_header_attributes(node):
+    if isinstance(node, dict):
+        if node.get("t") == "Header":
+            node["c"][1] = ["", [], []]
+        if isinstance(node.get("c"), list):
+            _clear_header_attributes(node["c"])
+    elif isinstance(node, list):
+        for item in node:
+            _clear_header_attributes(item)
+
+
+def clean_calibre_ast(doc):
+    """Structural cleanup of a pandoc JSON AST read from Calibre's HTML, in place.
+
+    - EPUB footnotes become real pandoc notes (see convert_footnotes()).
+    - In-book links lose their targets but keep their text: the ids they point
+      at do not survive into the translated book.
+    - Spans are unwrapped, so `{lang="…"}` and class attributes never reach
+      the Markdown.
+    - Empty anchors inside text (`<a id="page_12"/>`) are dropped.
+    - Heading and link attributes are cleared, whatever their id or class
+      (external links keep their URL and title).
+    """
+    blocks = doc.get("blocks", [])
+    footnotes = convert_footnotes(blocks)
+    _map_inline_lists(blocks, _unwrap_inline_markup)
+    _clear_header_attributes(blocks)
+    return footnotes
+
+
 def convert_html_to_markdown(html_file, md_file, strip_page_numbers=False):
     """Convert HTML to Markdown using pandoc"""
     try:
         import pypandoc
 
-        pypandoc.convert_file(
-            html_file,
-            'markdown',
+        doc = json.loads(pypandoc.convert_file(html_file, 'json'))
+        footnotes = clean_calibre_ast(doc)
+        if footnotes:
+            print(f"Converted {footnotes} footnote(s) to Markdown footnotes")
+        pypandoc.convert_text(
+            json.dumps(doc),
+            # Without smart, typographic dashes and quotes stay Unicode instead
+            # of becoming ---, -- and backslash-escaped ASCII quotes.
+            'markdown-smart',
+            format='json',
             outputfile=md_file,
-            extra_args=['--wrap=none']
+            # block puts each note right after the paragraph citing it, so a
+            # note and its reference usually land in the same chunk.
+            extra_args=['--wrap=none', '--reference-location=block'],
         )
 
         if os.path.exists(md_file):
@@ -391,6 +707,36 @@ def _detect_page_number_lines(lines):
     return {digit_indices[i] for i in lnds}
 
 
+_CODE_FENCE_RE = re.compile(r'^(`{3,}|~{3,})')
+
+
+def _fenced_code_line_indices(lines):
+    found = set()
+    fence = None
+    for i, line in enumerate(lines):
+        match = _CODE_FENCE_RE.match(line)
+        if fence:
+            found.add(i)
+            if (match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence)
+                    and not line[match.end():].strip()):
+                fence = None
+        elif match:
+            fence = match.group(1)
+            found.add(i)
+    return found
+
+
+def _is_empty_anchor_line(line):
+    """True for a body line that only holds empty anchors, e.g. `[]` or `[]{#page_3}`.
+
+    Indented lines are code, never anchors; fenced code is excluded by the caller.
+    """
+    if line[:1].isspace():
+        return False
+    residue = re.sub(r'\{[^}]*\}|\(#[^)\s]*\)', '', line)
+    return '[' in residue and not residue.strip('[] \t')
+
+
 def clean_calibre_markers(content, strip_page_numbers=False):
     """Clean up Calibre-specific markers from markdown content.
 
@@ -403,6 +749,9 @@ def clean_calibre_markers(content, strip_page_numbers=False):
 
     Pass strip_page_numbers=True to bypass both layers and aggressively delete
     every standalone-digit line (legacy behavior).
+
+    Lines holding only empty anchors are dropped as well, but they still count
+    as neighbours for layer 1.
     """
     content = re.sub(r'\{\.calibre[^}]*\}', '', content)
     content = re.sub(r'\(#calibre_link-\d+\)', '', content)
@@ -416,6 +765,7 @@ def clean_calibre_markers(content, strip_page_numbers=False):
     lines = content.split('\n')
 
     page_number_lines = set() if strip_page_numbers else _detect_page_number_lines(lines)
+    code_lines = _fenced_code_line_indices(lines)
 
     def is_calibre_noise(line):
         s = line.strip()
@@ -446,6 +796,8 @@ def clean_calibre_markers(content, strip_page_numbers=False):
         if stripped_line.startswith(':::'):
             continue
         if stripped_line.endswith('.ct}') or stripped_line.endswith('.cn}'):
+            continue
+        if i not in code_lines and _is_empty_anchor_line(line):
             continue
 
         if re.match(r'^\s*\d+\s*$', line):
@@ -663,11 +1015,20 @@ def import_markdown_input(input_file, input_md, temp_dir):
 # Structural block parsing and chunk splitting (Step 3)
 # =============================================================================
 
+# Pandoc footnote labels cannot contain whitespace, ^, [ or ].
+_FOOTNOTE_DEF_RE = re.compile(r'^ {0,3}\[\^[^\]\s^\[]+\]:')
+
+
+def _is_indented_text(line):
+    return line.startswith(('    ', '\t')) and bool(line.strip())
+
+
 def parse_structural_blocks(content):
     """Parse markdown into structural blocks that should not be split.
 
     Returns list of (text, block_type) tuples where block_type is one of:
-    'heading', 'code_block', 'math_block', 'table', 'list', 'blockquote', 'image', 'paragraph'
+    'heading', 'code_block', 'math_block', 'table', 'list', 'blockquote',
+    'footnote', 'image', 'paragraph'
     """
     blocks = []
     lines = content.split('\n')
@@ -764,6 +1125,23 @@ def parse_structural_blocks(content):
             blocks.append(('\n'.join(block_lines), 'list'))
             continue
 
+        # Footnote definition plus its indented continuation paragraphs. Kept
+        # whole: merging strips each chunk, which would un-indent a
+        # continuation that started the next chunk and detach it from its note.
+        if _FOOTNOTE_DEF_RE.match(line):
+            block_lines = [line]
+            i += 1
+            while i < len(lines):
+                if _is_indented_text(lines[i]) or (
+                    not lines[i].strip() and i + 1 < len(lines) and _is_indented_text(lines[i + 1])
+                ):
+                    block_lines.append(lines[i])
+                    i += 1
+                else:
+                    break
+            blocks.append(('\n'.join(block_lines), 'footnote'))
+            continue
+
         # Image line (standalone or with surrounding caption)
         if re.match(r'!\[', stripped):
             blocks.append((line, 'image'))
@@ -817,6 +1195,12 @@ def merge_blocks_to_chunks(blocks, target_size=6000):
         # If a single block is oversized, handle degradation
         if block_size > target_size * 2:
             flush()
+            if btype == 'footnote':
+                # A continuation paragraph cut loose from its `[^N]:` line
+                # loses its indent when chunks are merged and becomes body text.
+                print(f"  WARNING: Oversized footnote ({block_size} chars), kept in one chunk")
+                chunks.append(text)
+                continue
             print(f"  WARNING: Oversized {btype} block ({block_size} chars), force-splitting")
             sub_chunks = _force_split_block(text, target_size)
             chunks.extend(sub_chunks)
@@ -834,7 +1218,9 @@ def merge_blocks_to_chunks(blocks, target_size=6000):
         current_size += block_size
 
     flush()
-    return chunks
+    # The blank line after a final oversized block would otherwise be its own
+    # chunk, and an empty translation of it fails the merge.
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
 def _force_split_block(text, target_size):

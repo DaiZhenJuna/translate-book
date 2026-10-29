@@ -191,6 +191,8 @@ python3 scripts/convert.py /path/to/book.pdf --olang zh
 
 Calibre converts the input to HTMLZ, which is extracted and converted to Markdown, then split into chunks (~6000 chars each). A `manifest.json` records the SHA-256 hash of each source chunk for later validation, and a `source_fingerprint.json` ties the temp dir to the exact source bytes it was built from — re-running against a replaced source file aborts instead of silently reusing stale chunks. Temp dirs created before fingerprinting are adopted with a warning on first re-run.
 
+The HTML → Markdown step also cleans Calibre's markup structurally. EPUB footnotes — a marker link such as `<a href="#n1"><sup>1</sup></a>` in the text, paired with a note paragraph that opens with a link back to it — become Pandoc footnotes (`[^1]` in the text, `[^1]: …` right after the paragraph), numbered across the whole book so that per-chapter numbering cannot collide after merging. In-book links keep their text, span attributes such as `{lang="…"}`, empty page anchors, and heading ids are dropped, and typographic dashes and quotes stay as Unicode instead of `---` or escaped ASCII quotes. Notes without a back-link (for example EPUB 3 `<aside>` footnotes) stay ordinary paragraphs.
+
 By default the working directory is `{book_name}_temp/` under the current directory. Use `--temp-root /path/to/work` to keep the same leaf directory name under a different parent.
 
 #### Formula- and table-heavy PDFs: convert Markdown instead (optional)
@@ -266,6 +268,7 @@ Before merging, the script validates:
 - Every source chunk has a corresponding output file (1:1 match)
 - Source chunk hashes match the manifest (no stale outputs)
 - No output files are empty, blank (whitespace-only), or unreadable — a blank chunk aborts the merge instead of silently dropping its content
+- Every output chunk keeps its source chunk's footnote markers (`[^N]` and `[^N]:`), so no reference or note is left dangling
 
 Then: merge → Pandoc HTML → inject TOC → Calibre generates DOCX, EPUB, PDF.
 

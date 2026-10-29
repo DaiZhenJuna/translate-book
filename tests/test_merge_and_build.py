@@ -243,6 +243,78 @@ class MergeBlankOutputTests(unittest.TestCase):
             self.assertIn("二。", merged)
 
 
+class FootnoteValidationTests(unittest.TestCase):
+    def _write(self, path, content):
+        Path(path).write_text(content, encoding="utf-8")
+
+    def _validate(self, source, output):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write(Path(temp_dir) / "chunk0001.md", source)
+            self._write(Path(temp_dir) / "output_chunk0001.md", output)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ok = merge_and_build._validate_chunk_footnotes(temp_dir)
+        return ok, buf.getvalue()
+
+    def test_passes_when_markers_are_preserved(self):
+        ok, out = self._validate(
+            "Text.[^1] More.[^2]\n\n[^1]: Note one.\n\n[^2]: Note two.\n\n    Continued.\n",
+            "正文。[^1]更多。[^2]\n\n[^1]: 注释一。\n\n[^2]: 注释二。\n\n    续段。\n",
+        )
+        self.assertTrue(ok, msg=out)
+
+    def test_fails_when_reference_is_dropped(self):
+        ok, out = self._validate("Text.[^1]\n\n[^1]: Note.\n", "正文。\n\n[^1]: 注释。\n")
+        self.assertFalse(ok)
+        self.assertIn("output_chunk0001.md", out)
+        self.assertIn("missing references [^N] (count): [('1', 1)]", out)
+
+    def test_fails_when_definition_is_renumbered(self):
+        ok, out = self._validate("Text.[^7]\n\n[^7]: Note.\n", "正文。[^7]\n\n[^1]: 注释。\n")
+        self.assertFalse(ok)
+        self.assertIn("missing definitions [^N]: (count): [('7', 1)]", out)
+        self.assertIn("extra   definitions [^N]: (count): [('1', 1)]", out)
+
+    def test_reference_followed_by_a_colon_is_not_a_definition(self):
+        ok, out = self._validate("As noted[^3]: the rest.\n", "如前所述[^3]：其余。\n")
+        self.assertTrue(ok, msg=out)
+
+    def test_ignores_pseudo_footnotes_from_older_conversions(self):
+        ok, out = self._validate("Text.[^1^]\n\n[^1^] Note.\n", "正文。^1^\n\n^1^ 注释。\n")
+        self.assertTrue(ok, msg=out)
+
+    def test_merge_fails_and_removes_stale_output_on_footnote_divergence(self):
+        from manifest import create_manifest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_dir = Path(tmp)
+            self._write(temp_dir / "input.md", "Text.[^1]\n\n[^1]: Note.\n")
+            self._write(temp_dir / "chunk0001.md", "Text.[^1]\n\n[^1]: Note.\n")
+            self._write(temp_dir / "output_chunk0001.md", "正文。\n\n注释。\n")
+            create_manifest(str(temp_dir), ["chunk0001.md"], str(temp_dir / "input.md"))
+            self._write(temp_dir / "output.md", "stale merged content")
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ok = merge_and_build.merge_markdown_files(str(temp_dir))
+
+            self.assertFalse(ok)
+            self.assertFalse((temp_dir / "output.md").exists())
+            self.assertIn("Footnote validation failed", buf.getvalue())
+
+    @unittest.skipUnless(merge_and_build.MARKDOWN_AVAILABLE, "python-markdown is not installed")
+    def test_python_markdown_fallback_renders_footnotes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            md = Path(tmp) / "output.md"
+            html = Path(tmp) / "output.html"
+            self._write(md, "Text.[^1]\n\n[^1]: Note.\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(merge_and_build.convert_with_python_markdown(str(md), str(html), "T"))
+            rendered = html.read_text(encoding="utf-8")
+        self.assertIn('class="footnote"', rendered)
+        self.assertNotIn("[^1]", rendered)
+
+
 class ImageValidationTests(unittest.TestCase):
     """Validates _validate_chunk_images, _check_generated_html_sanity, and the
     basic-regex alt-escape fix. Together these guard against subagent-produced

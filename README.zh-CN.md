@@ -191,6 +191,8 @@ python3 scripts/convert.py /path/to/book.pdf --olang zh
 
 Calibre 将输入文件转为 HTMLZ，解压后转为 Markdown，再拆分为 chunk（每个约 6000 字符）。`manifest.json` 记录每个源 chunk 的 SHA-256 hash，用于后续校验；`source_fingerprint.json` 则把 temp 目录与生成它的源文件字节绑定 — 若源文件被替换后重跑，会直接报错中止，而不是静默复用过时的 chunk。指纹机制之前创建的 temp 目录会在首次重跑时打印警告并被接管。
 
+HTML → Markdown 这一步还会按结构清理 Calibre 的标记。EPUB 脚注（正文里的标记链接如 `<a href="#n1"><sup>1</sup></a>`，配上开头带回链指向它的注释段落）会转成 Pandoc 脚注（正文 `[^1]`，定义 `[^1]: …` 紧跟在该段之后），编号全书连续，合并后不会因每章从 1 重新编号而撞号。书内链接只保留文字，`{lang="…"}` 之类的 span 属性、空的页码锚点和标题 id 会被去掉，弯引号和破折号保持 Unicode 原样，而不是变成 `---` 或转义的 ASCII 引号。没有回链的注释（例如 EPUB 3 的 `<aside>` 脚注）仍保持普通段落。
+
 默认工作目录是当前目录下的 `{book_name}_temp/`。如果要换父目录，可使用 `--temp-root /path/to/work`；叶子目录名仍保持 `{book_name}_temp/`。
 
 #### 公式、表格密集的 PDF：改为转换 Markdown（可选）
@@ -266,6 +268,7 @@ python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名
 - 每个源 chunk 都有对应的输出文件（1:1 匹配）
 - 源 chunk hash 与 manifest 一致（无过时输出）
 - 输出文件不为空、非纯空白（whitespace-only）、可正常读取 — 空白 chunk 会中止合并，而不是静默丢失该段内容
+- 每个输出 chunk 保留源 chunk 中的全部脚注标记（`[^N]` 和 `[^N]:`），不会留下悬空的引用或注释
 
 校验通过后：合并 → Pandoc 生成 HTML → 注入目录 → Calibre 生成 DOCX、EPUB、PDF。
 
