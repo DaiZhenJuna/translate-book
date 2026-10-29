@@ -730,5 +730,59 @@ class MarkdownInputEndToEndTests(unittest.TestCase):
             self.assertFalse((workdir / "blank_temp" / "input.md").exists())
 
 
+class CalibreHtmlzLocationTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.source = self.root / "book.epub"
+        self.source.write_bytes(b"epub bytes")
+        self.users_htmlz = self.root / "book.htmlz"
+        self.users_htmlz.write_text("user-owned file", encoding="utf-8")
+        self.htmlz_paths = []
+
+    def _main(self, conversion_succeeds=True):
+        import contextlib
+        import io
+        import zipfile
+        from unittest import mock
+
+        def fake_calibre(input_file, htmlz_file, calibre_path):
+            self.htmlz_paths.append(Path(htmlz_file))
+            with zipfile.ZipFile(htmlz_file, "w") as z:
+                z.writestr("index.html", "<html><body><p>Body text.</p></body></html>")
+            return conversion_succeeds
+
+        def fake_markdown(html_file, md_file, *args, **kwargs):
+            Path(md_file).write_text("# Title\n\nBody text.\n", encoding="utf-8")
+            return True
+
+        argv = ["convert.py", str(self.source), "--temp-root", str(self.root / "work")]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(convert, "find_calibre_convert", return_value="ebook-convert"), \
+                mock.patch.object(convert, "convert_to_htmlz", side_effect=fake_calibre), \
+                mock.patch.object(convert, "convert_html_to_markdown", side_effect=fake_markdown), \
+                contextlib.redirect_stdout(io.StringIO()):
+            convert.main()
+
+    def test_users_htmlz_next_to_the_source_survives_a_conversion(self):
+        self._main()
+
+        self.assertEqual(self.users_htmlz.read_text(encoding="utf-8"), "user-owned file")
+        [htmlz] = self.htmlz_paths
+        self.assertNotEqual(htmlz.parent, self.root)
+        self.assertFalse(htmlz.exists())
+        self.assertTrue((self.root / "work" / "book_temp" / "chunk0001.md").exists())
+
+    def test_failed_conversion_leaves_no_htmlz_behind(self):
+        with self.assertRaises(SystemExit):
+            self._main(conversion_succeeds=False)
+
+        self.assertEqual(self.users_htmlz.read_text(encoding="utf-8"), "user-owned file")
+        [htmlz] = self.htmlz_paths
+        self.assertFalse(htmlz.exists())
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["book.epub", "book.htmlz"])
+
+
 if __name__ == "__main__":
     unittest.main()
