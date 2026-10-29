@@ -262,7 +262,7 @@ python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名
 python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名》" --cover cover.jpg --export-name "译后书名"
 ```
 
-`--cover` 会把显式封面图传给 EPUB 的 Calibre 步骤。`--export-name` 会额外生成如 `译后书名.epub` 的别名副本，同时保留内部 canonical 的 `book.*` 产物。
+`--cover` 会把显式封面图传给 EPUB 的 Calibre 步骤。`--export-name` 会额外生成如 `译后书名.epub` 的别名副本，同时保留内部 canonical 的 `book.*` 产物。`book_doc` 是保留名称（不区分大小写），会在构建前被拒绝，因为其 HTML 别名会覆盖 `book_doc.html`。
 
 合并前校验：
 - 每个源 chunk 都有对应的输出文件（1:1 匹配）

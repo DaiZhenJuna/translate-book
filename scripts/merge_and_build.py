@@ -1048,7 +1048,12 @@ def _validate_export_name(name):
         raise ValueError("--export-name must not be empty")
     if '\x00' in name or '/' in name or '\\' in name:
         raise ValueError("--export-name must be a filename stem, not a path")
-    return name.strip()
+    stem = name.strip()
+    # This stem maps the web HTML alias onto the canonical ebook HTML.
+    # Check case-insensitively so the same names are safe on macOS/Windows.
+    if stem.casefold() == "book_doc":
+        raise ValueError("--export-name would overwrite reserved output book_doc.html; choose another name")
+    return stem
 
 
 def export_named_aliases(temp_dir, export_name):
@@ -1072,7 +1077,7 @@ def export_named_aliases(temp_dir, export_name):
         if not os.path.exists(src):
             continue
         dst = os.path.join(temp_dir, dst_name)
-        if os.path.abspath(src) == os.path.abspath(dst):
+        if os.path.exists(dst) and os.path.samefile(src, dst):
             continue
         shutil.copy2(src, dst)
         copied.append(dst_name)

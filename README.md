@@ -262,7 +262,7 @@ Optional output flags:
 python3 scripts/merge_and_build.py --temp-dir book_temp --title "《translated title》" --cover cover.jpg --export-name "translated-title"
 ```
 
-`--cover` passes an explicit image to the EPUB Calibre step. `--export-name` creates alias copies such as `translated-title.epub` while preserving the canonical `book.*` pipeline artifacts.
+`--cover` passes an explicit image to the EPUB Calibre step. `--export-name` creates alias copies such as `translated-title.epub` while preserving the canonical `book.*` pipeline artifacts. The name `book_doc` (case-insensitive) is reserved and rejected before building because its HTML alias would overwrite `book_doc.html`.
 
 Before merging, the script validates:
 - Every source chunk has a corresponding output file (1:1 match)

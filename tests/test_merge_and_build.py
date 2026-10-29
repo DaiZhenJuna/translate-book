@@ -181,6 +181,54 @@ class ExportAliasTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             merge_and_build.export_named_aliases("/tmp", "../bad")
 
+    def test_export_name_rejects_canonical_collision_without_writing(self):
+        for export_name in ["book_doc", "BOOK_DOC", "  book_doc  "]:
+            with self.subTest(export_name=export_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                originals = {
+                    name: name.encode("utf-8")
+                    for name in ["book.html", "book_doc.html", "book.docx", "book.epub", "book.pdf"]
+                }
+                for name, content in originals.items():
+                    (root / name).write_bytes(content)
+
+                with self.assertRaisesRegex(ValueError, "book_doc.html"):
+                    merge_and_build.export_named_aliases(temp_dir, export_name)
+
+                self.assertEqual({p.name: p.read_bytes() for p in root.iterdir()}, originals)
+
+    def test_canonical_book_export_name_is_a_noop(self):
+        for export_name in ["book", "BOOK"]:
+            with self.subTest(export_name=export_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                for name in ["book.html", "book_doc.html", "book.docx", "book.epub", "book.pdf"]:
+                    self._write(root / name, name)
+                originals = {p.name: p.read_bytes() for p in root.iterdir()}
+                same_files = (root / f"{export_name}.html").exists()
+
+                copied = merge_and_build.export_named_aliases(temp_dir, export_name)
+
+                self.assertEqual(len(copied), 0 if same_files else 5)
+                for name, content in originals.items():
+                    self.assertEqual((root / name).read_bytes(), content)
+                self.assertEqual(len(list(root.iterdir())), len(originals) + len(copied))
+
+    def test_main_rejects_export_collision_before_building(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = io.StringIO()
+            with mock.patch.object(
+                sys, "argv",
+                ["merge_and_build.py", "--temp-dir", temp_dir, "--export-name", "book_doc"],
+            ), mock.patch.object(
+                merge_and_build, "merge_markdown_files"
+            ) as merge_mock, contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit) as exc:
+                    merge_and_build.main()
+
+            self.assertNotEqual(exc.exception.code, 0)
+            self.assertIn("book_doc.html", output.getvalue())
+            merge_mock.assert_not_called()
+
 
 class MergeBlankOutputTests(unittest.TestCase):
     """A whitespace-only output chunk must abort the merge instead of being
